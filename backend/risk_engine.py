@@ -38,6 +38,8 @@ WEIGHTS = {
     "spoof": 0.15,
 }
 
+HOST_ALLOWLIST = {h.strip() for h in os.getenv("SHIELDGPT_HOST_ALLOWLIST", "").split(",") if h.strip()}
+HOST_BLOCKLIST = {h.strip() for h in os.getenv("SHIELDGPT_HOST_BLOCKLIST", "").split(",") if h.strip()}
 
 # Match common URLs (with or without scheme) and avoid over-escaped literals.
 URL_REGEX = re.compile(
@@ -153,6 +155,10 @@ def _is_safe_target(url: str) -> bool:
                 return False
         except ValueError:
             pass
+        if HOST_ALLOWLIST and host not in HOST_ALLOWLIST:
+            return False
+        if host in HOST_BLOCKLIST:
+            return False
         return True
     except Exception:
         return False
@@ -332,20 +338,24 @@ class RiskEngine:
             )
             content = response.choices[0].message.content
             data = json.loads(content)
+            if not isinstance(data, dict) or "score" not in data:
+                return None
             score = int(data.get("score", 0))
             reason = data.get("reason", "LLM-based intent classification.")
             return normalize_score(score), reason
         except Exception:
             return None
 
-    def _analyze_domain(self, url: str, allow_network: bool = True) -> DomainFinding:
+    def _analyze_domain(self, url: str, allow_network: bool = False) -> DomainFinding:
         issues: List[str] = []
         score = 0
+        if not url.startswith(("http://", "https://")):
+            url = f"http://{url}"
         parsed = tldextract.extract(url)
         domain = parsed.domain
         suffix = parsed.suffix
         fqdn = ".".join(part for part in [parsed.domain, parsed.suffix] if part)
-        netloc = urlparse(url if url.startswith("http") else f"http://{url}").netloc
+        netloc = urlparse(url).netloc
         host = netloc.split(":")[0] if netloc else fqdn
 
         if _shortener_used(fqdn):
