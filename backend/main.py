@@ -14,6 +14,8 @@ from .storage import HistoryStore
 
 ALLOWED_ORIGINS = os.getenv("SHIELDGPT_ALLOWED_ORIGINS", "http://localhost:8501,http://127.0.0.1:8501").split(",")
 API_KEY = os.getenv("SHIELDGPT_API_KEY")
+RATE_LIMIT = int(os.getenv("SHIELDGPT_RATE_LIMIT", "60"))  # requests per minute placeholder
+last_requests = {}
 
 
 app = FastAPI(title="ShieldGPT API", version="0.1")
@@ -50,6 +52,16 @@ def _require_api_key(auth: Optional[str] = Header(default=None)):
         raise HTTPException(status_code=401, detail="Unauthorized")
 
 
+def _rate_limit(client_id: str):
+    import time
+    now = int(time.time())
+    window = now // 60
+    key = (client_id, window)
+    last_requests[key] = last_requests.get(key, 0) + 1
+    if last_requests[key] > RATE_LIMIT:
+        raise HTTPException(status_code=429, detail="Rate limit exceeded")
+
+
 def _validate_input(msg: str, urls: Optional[List[str]]):
     if msg and len(msg) > 8000:
         raise HTTPException(status_code=400, detail="Input too large (max 8000 chars)")
@@ -60,6 +72,7 @@ def _validate_input(msg: str, urls: Optional[List[str]]):
 @app.post("/analyze")
 def analyze(req: AnalyzeRequest, authorization: Optional[str] = Header(default=None)):
     _require_api_key(authorization)
+    _rate_limit(authorization or "anon")
     _validate_input(req.message_text, req.urls)
     result = engine.analyze(
         req.message_text,
@@ -104,6 +117,7 @@ def _brief(result):
 @app.post("/ext/analyze")
 def ext_analyze(req: ExtensionAnalyzeRequest, authorization: Optional[str] = Header(default=None)):
     _require_api_key(authorization)
+    _rate_limit(authorization or "anon")
     _validate_input(req.text, None)
     urls = extract_urls(req.text)
     result = engine.analyze(
