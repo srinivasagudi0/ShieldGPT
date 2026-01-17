@@ -5,6 +5,7 @@ import os
 import re
 import socket
 import ssl
+import ipaddress
 import time
 from datetime import datetime, timezone
 from difflib import SequenceMatcher
@@ -133,6 +134,28 @@ def _collect_phrases(text: str, patterns: List, category: str) -> List[Dict[str,
                 }
             )
     return findings
+
+
+def _is_safe_target(url: str) -> bool:
+    """Rudimentary SSRF guard: allow only public hostnames and non-private IPs."""
+    try:
+        parsed = urlparse(url if url.startswith(("http://", "https://")) else f"http://{url}")
+        host = parsed.hostname or ""
+        if not host or host in {"localhost"} or host.startswith("localhost"):
+            return False
+        # Disallow obvious internal hostnames
+        if host.endswith(".local") or host.endswith(".internal"):
+            return False
+        # If it's an IP, ensure it's not private/link-local
+        try:
+            ip = ipaddress.ip_address(host)
+            if ip.is_private or ip.is_loopback or ip.is_link_local:
+                return False
+        except ValueError:
+            pass
+        return True
+    except Exception:
+        return False
 
 
 def _domain_age_days(fqdn: str) -> Optional[int]:
@@ -342,7 +365,11 @@ class RiskEngine:
             issues.append(f"Looks like typo-squat of a known brand (similarity {typo_ratio:.2f})")
             score += 30
 
-        if allow_network:
+        net_allowed = allow_network and _is_safe_target(url)
+        if allow_network and not net_allowed:
+            issues.append("Network checks skipped (unsafe target)")
+
+        if net_allowed:
             redirect_count = _check_redirects(url) if url.startswith("http") else 0
             if redirect_count >= 2:
                 issues.append(f"Multiple redirects detected ({redirect_count})")
@@ -358,8 +385,8 @@ class RiskEngine:
             issues.append("High domain entropy (looks randomised)")
             score += 10
 
-        age_days = _domain_age_days(fqdn) if fqdn and allow_network else None
-        if allow_network:
+        age_days = _domain_age_days(fqdn) if fqdn and net_allowed else None
+        if net_allowed:
             if age_days is not None:
                 if age_days < 30:
                     issues.append(f"New domain (~{age_days} days old)")
@@ -372,7 +399,7 @@ class RiskEngine:
         else:
             issues.append("Domain age check skipped (privacy lock)")
 
-        if host and allow_network:
+        if host and net_allowed:
             cert_days = _cert_days_remaining(host)
             if cert_days is not None and cert_days < 30:
                 issues.append("TLS certificate close to expiry or misconfigured")
@@ -411,7 +438,7 @@ class RiskEngine:
         message_text: str,
         urls: Optional[List[str]] = None,
         include_llm: bool = True,
-        allow_network: bool = True,
+        allow_network: bool = False,
         llm_model: Optional[str] = None,
     ) -> RiskResult:
         text = message_text or ""
