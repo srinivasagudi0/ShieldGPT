@@ -2,7 +2,8 @@ from __future__ import annotations
 
 from typing import List, Optional
 
-from fastapi import FastAPI, HTTPException, Response
+import os
+from fastapi import FastAPI, HTTPException, Response, Header
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 
@@ -11,10 +12,14 @@ from .risk_engine import RiskEngine, extract_urls
 from .simulator import get_scenario, synthesize_voice
 from .storage import HistoryStore
 
+ALLOWED_ORIGINS = os.getenv("SHIELDGPT_ALLOWED_ORIGINS", "http://localhost:8501,http://127.0.0.1:8501").split(",")
+API_KEY = os.getenv("SHIELDGPT_API_KEY")
+
+
 app = FastAPI(title="ShieldGPT API", version="0.1")
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
+    allow_origins=[o for o in ALLOWED_ORIGINS if o],
     allow_methods=["*"],
     allow_headers=["*"],
 )
@@ -28,19 +33,34 @@ class AnalyzeRequest(BaseModel):
     urls: Optional[List[str]] = None
     include_llm: bool = False
     input_type: str = "unknown"
-    allow_network: bool = True
+    allow_network: bool = False
     llm_model: Optional[str] = None
 
 
 class ExtensionAnalyzeRequest(BaseModel):
     text: str
     include_llm: bool = False
-    allow_network: bool = True
+    allow_network: bool = False
     llm_model: Optional[str] = None
 
 
 @app.post("/analyze")
-def analyze(req: AnalyzeRequest):
+def _require_api_key(auth: Optional[str] = Header(default=None)):
+    if API_KEY and (not auth or auth.replace("Bearer ", "") != API_KEY):
+        raise HTTPException(status_code=401, detail="Unauthorized")
+
+
+def _validate_input(msg: str, urls: Optional[List[str]]):
+    if msg and len(msg) > 8000:
+        raise HTTPException(status_code=400, detail="Input too large (max 8000 chars)")
+    if urls and len(urls) > 12:
+        raise HTTPException(status_code=400, detail="Too many URLs (max 12)")
+
+
+@app.post("/analyze")
+def analyze(req: AnalyzeRequest, authorization: Optional[str] = Header(default=None)):
+    _require_api_key(authorization)
+    _validate_input(req.message_text, req.urls)
     result = engine.analyze(
         req.message_text,
         urls=req.urls,
@@ -81,7 +101,10 @@ def _brief(result):
 
 
 @app.post("/ext/analyze")
-def ext_analyze(req: ExtensionAnalyzeRequest):
+@app.post("/ext/analyze")
+def ext_analyze(req: ExtensionAnalyzeRequest, authorization: Optional[str] = Header(default=None)):
+    _require_api_key(authorization)
+    _validate_input(req.text, None)
     urls = extract_urls(req.text)
     result = engine.analyze(
         req.text,
